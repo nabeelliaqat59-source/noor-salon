@@ -1,0 +1,94 @@
+name: Build Android app
+
+# Runs on every push to main, and from the Actions tab with "Run workflow".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Unpack app code (if uploaded as noor_salon.zip)
+        run: |
+          if [ -f noor_salon.zip ]; then
+            unzip -q -o noor_salon.zip -d /tmp/src
+            cp -r /tmp/src/noor_salon/. .
+            echo "Code unpacked from noor_salon.zip"
+          fi
+
+      - name: Check secrets
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then echo "::error::Secret GOOGLE_SERVICES_JSON is missing. See README_URDU.md"; exit 1; fi
+          if [ -z "$KEYSTORE_BASE64" ]; then echo "::error::Secret KEYSTORE_BASE64 is missing. See README_URDU.md"; exit 1; fi
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Android project files
+        run: flutter create . --org com.noorbeauty --project-name noor_salon --platforms android
+
+      - name: Set minimum Android version (needed by Firebase)
+        run: |
+          f=android/app/build.gradle.kts
+          [ -f "$f" ] || f=android/app/build.gradle
+          sed -i -E 's/minSdk *= *flutter\.minSdkVersion/minSdk = 23/; s/minSdkVersion +flutter\.minSdkVersion/minSdkVersion 23/' "$f"
+          grep -nE "minSdk" "$f"
+
+      - name: Connect Firebase
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          printf '%s' "$GOOGLE_SERVICES_JSON" > google-services.json
+          python3 tool/make_firebase_options.py google-services.json com.noorbeauty.noor_salon
+          rm google-services.json
+
+      - name: Use the salon's fixed signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p ~/.android
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep -E "SHA1|SHA256"
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk NoorSalon-${{ github.run_number }}.apk
+
+      - name: Keep APK as a download
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoorSalon-apk
+          path: NoorSalon-${{ github.run_number }}.apk
+
+      - name: Publish to Releases page
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Noor Salon build ${{ github.run_number }}
+          body: Download the .apk file below on your Android phone and open it to install.
+          files: NoorSalon-${{ github.run_number }}.apk
